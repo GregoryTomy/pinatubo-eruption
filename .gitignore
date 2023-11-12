@@ -1,0 +1,8 @@
+*.ipynb
+Data/
+output/
+tests/
+zOld
+logs/
+notes.md
+
