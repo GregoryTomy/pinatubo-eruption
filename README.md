@@ -1,4 +1,4 @@
-# Predicting Temperature from the Mount Pinatubo Eruption Dataset
+# Spatio-Temporal Modeling of Temperature 
 
 ## Project Overview
-This repository hosts an ongoing collaboration with Sandia National Labs,
+The repository is dedicated to a collaborative project with Sandia National Labs, centered on the application of deep learning strategies to forecast temperature variations in the context of the 1991 Mount Pinatubo eruption. By harnessing the PyTorch library, the project engages in spatio-temporal prediction, integrating daily weather data spanning 15 years across 1152 distinct locations. The overarching goal is to develop sophisticated, dependable models capable of contributing to climate research and potential weather manipulation initiatives.
