@@ -5,4 +5,5 @@ tests/
 zOld
 logs/
 notes.md
+__pycache__
 

@@ -6,16 +6,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import logging
+from modules.utils import setup_logger
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s]: %(message)s",
-    handlers=[
-        logging.FileHandler("logs/model.log"),  # Log to this file
-        logging.StreamHandler(),  # Log to console
-    ],
-)
-logger = logging.getLogger(__name__)
+logger = setup_logger("model", "logs/model.log", logging.WARNING)
 
 
 class Recompose(nn.Module):
@@ -41,7 +34,7 @@ class Recompose(nn.Module):
         )
 
         # NOTE: the return here returns the first column. All columns should be the same
-        return recomped[:, 1]
+        return recomped[:, 1].view(-1, 1)
 
 
 class SpatioTemporalModel(nn.Module):
@@ -85,9 +78,9 @@ class SpatioTemporalModel(nn.Module):
 
     def forward(self, X, indices):
         pred_coeff = self.network(X)
-        logging.info(f"Auxiliary output calculated. Shape: {pred_coeff.shape}")
+        # logging.info(f"Auxiliary output calculated. Shape: {pred_coeff.shape}")
 
         recomped = self.recompose(pred_coeff, indices)
-        logging.info(f"Final output recomposed. Shape: {recomped.shape}")
+        # logging.info(f"Final output recomposed. Shape: {recomped.shape}")
 
         return recomped
