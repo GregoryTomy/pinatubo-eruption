@@ -50,7 +50,7 @@ class ClimateData:
 
         return self
 
-    def plot_explained_variance(self):
+    def plot_explained_variance(self, name):
         explained_var = self.scaling_factors**2 / (self.scaling_factors**2).sum()
         cumulative_var = np.cumsum(explained_var)
         n_components_95 = np.argmax(cumulative_var >= 0.95) + 1
@@ -78,7 +78,7 @@ class ClimateData:
         plt.ylabel("Explained Variance Ratio")
         plt.xlabel("Principal Components")
         plt.legend(loc="best")
-        plt.savefig("images/explained_variance.png")
+        plt.savefig(f"images/explained_variance_{name}.png")
 
     # def plot_bases_coefficients(self, lons, lats):
     #     plt.figure(figsize=(12, 8))
@@ -117,12 +117,21 @@ def load_and_preprocess_data(file_path):
 
 def split_train_test(df, train_size, seed=9):
     np.random.seed(seed)
+    # train portion of 0.8
     train_idx = np.random.choice(
         df.index, size=int(len(df.index) * train_size), replace=False
     )
-    test_idx = df.index.difference(train_idx)
-    return df.loc[train_idx], df.loc[test_idx]
+    
+    # val portion is 0.2 (1-0.8) of the train portion
+    # ? val portion might be too big. maybe half that
+    val_idx = np.random.choice(
+        train_idx, size=int(len(train_idx) * (1-train_size) * 0.5), replace=False
+    )
 
+    test_idx = df.index.difference(train_idx)
+    train_idx = np.setdiff1d(train_idx, val_idx) 
+
+    return df.loc[train_idx], df.loc[val_idx], df.loc[test_idx]
 
 def prepare_nn_data(train_df, df):
     model_train_df = train_df.reset_index().melt(

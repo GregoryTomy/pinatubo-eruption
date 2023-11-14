@@ -12,25 +12,31 @@ logger = setup_logger("model", "logs/model.log", logging.WARNING)
 
 
 class Recompose(nn.Module):
-    def __init__(self, climate_data):
+    def __init__(self, climate_data_dict):
         # climate data is the saved dataclass stored in output
         super().__init__()
-        self.register_buffer("temporal_bases", climate_data.temporal_bases)
-        self.register_buffer("scaling_factors", climate_data.scaling_factors)
-        # self.register_buffer("time_mean", climate_data.time_mean)
-        # self.register_buffer("centering", climate_data.centering)
+        self.climate_data_dict = climate_data_dict
 
-    def forward(self, targets, batch_indices):
+        for phase in ["train", "val", "test"]:
+            self.register_buffer(f"temporal_bases_{phase}", climate_data_dict[phase].temporal_bases)
+            self.register_buffer(f"scaling_factors_{phase}", climate_data_dict[phase].scaling_factors)
+            # self.register_buffer(f"time_mean_{phase}", climate_data_dict[phase].time_mean)
+            # self.register_buffer(f"centering_{phase}", climate_data_dict[phase].centering)
+
+    def forward(self, targets, batch_indices, phase):
+        # phase will take the values "train", "val", or "test"
+        temporal_bases = getattr(self, f"temporal_bases_{phase}")
+        scaling_factors = getattr(self, f"scaling_factors_{phase}")
+
         # here batch indices are used to get the corresponding temporal bases
         # shape of temporal bases should be (days, locations)
-        select_temp_bases = self.temporal_bases[batch_indices, :]
+        select_temp_bases = temporal_bases[batch_indices, :]
 
-        # --NOTE: for now we don't bother with the cli. Come back to it
-        # select_cli = self.climatology[indices]
 
-        # perform SVD recomp (ignoring the scaling and climatology for now)
+        # perform SVD recomp 
+        # ! ignoring the scaling and climatology for now
         recomped = torch.mm(
-            targets, torch.mm(torch.diag(self.scaling_factors), select_temp_bases.t())
+            targets, torch.mm(torch.diag(scaling_factors), select_temp_bases.t())
         )
 
         # NOTE: the return here returns the first column. All columns should be the same
@@ -38,7 +44,7 @@ class Recompose(nn.Module):
 
 
 class SpatioTemporalModel(nn.Module):
-    def __init__(self, input_channels, hidden_units, output_channels, climate_data):
+    def __init__(self, input_channels, hidden_units, output_channels, climate_data_dict):
         super().__init__()
         self.network = nn.Sequential(
             # block 1
@@ -61,7 +67,7 @@ class SpatioTemporalModel(nn.Module):
             nn.BatchNorm1d(hidden_units),
             nn.Linear(hidden_units, output_channels),
         )
-        self.recompose = Recompose(climate_data)
+        self.recompose = Recompose(climate_data_dict)
         self._init_weights()
 
     def _init_weights(self):
@@ -76,11 +82,11 @@ class SpatioTemporalModel(nn.Module):
                     bound = 1 / math.sqrt(fan_out)
                     nn.init.normal_(m.bias, -bound, bound)
 
-    def forward(self, X, indices):
+    def forward(self, X, indices, phase):
         pred_coeff = self.network(X)
         # logging.info(f"Auxiliary output calculated. Shape: {pred_coeff.shape}")
 
-        recomped = self.recompose(pred_coeff, indices)
+        recomped = self.recompose(pred_coeff, indices, phase)
         # logging.info(f"Final output recomposed. Shape: {recomped.shape}")
 
         return recomped

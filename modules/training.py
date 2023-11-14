@@ -44,11 +44,11 @@ class ClimateDataset(Dataset):
         return len(self.features)
 
     def __getitem__(self, idx):
-        features = self.scaled_features[idx]
+        scaled_features = self.scaled_features[idx]
         targets = self.targets[idx]
         indices = self.indices[idx]
 
-        return (features, targets, indices)
+        return (scaled_features, targets, indices)
 
     # -NOTE: maybe add inverse transofrm method for sclaer
 
@@ -92,13 +92,20 @@ class OneCycleScheduler(_LRScheduler):
 
 class TrainingApp:
     # TODO: need to add test/dataset in the init
-    def __init__(self, model, optimizer, training_data, sys_argv=None) -> None:
+    def __init__(
+        self, model, optimizer, training_data, validation_data, test_data, sys_argv=None
+    ) -> None:
         self.cli_args = self.parse_cli_args(sys_argv)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = self.load_model(model)
         self.optimizer = optimizer
         self.training_data = training_data
+        self.validation_data = validation_data
+        self.test_data = test_data
         self.loss_func = nn.MSELoss(reduction="none")
+        self.best_val_loss = float("inf")
+        self.patience_counter = 0
+        self.patience = 10
 
     @staticmethod
     def parse_cli_args(sys_argv):
@@ -107,7 +114,6 @@ class TrainingApp:
         parser.add_argument("--epochs", default=1, type=int)
         parser.add_argument("--batch-size", default=32, type=int)
         parser.add_argument("--name", default="train", type=str)
-        parser.add_argument("--val-perct", default=None, type=float)
         # ! provide argument for setting seed
 
         return parser.parse_args(sys_argv)
@@ -124,22 +130,9 @@ class TrainingApp:
         return model
 
     def init_dataloaders(self, seed=1):
-        dataset = ClimateDataset(self.training_data)
-
-        if self.cli_args.val_perct is not None:
-            np.random.seed(seed)
-            idx = np.arange(len(dataset))
-            val_idx = np.random.choice(
-                idx,
-                size=int(len(dataset) * self.cli_args.val_perct),
-                replace=False,
-            )
-            train_idx = np.setdiff1d(idx, val_idx, assume_unique=True)
-            train_dataset = Subset(dataset, train_idx)
-            val_dataset = Subset(dataset, val_idx)
-        else:
-            train_dataset = dataset
-            val_dataset = None
+        train_dataset = ClimateDataset(self.training_data)
+        val_dataset = ClimateDataset(self.validation_data)
+        test_dataset = ClimateDataset(self.test_data)
 
         batch_size = self.cli_args.batch_size
         if self.device.type == "cuda":
@@ -153,18 +146,29 @@ class TrainingApp:
             num_workers=self.cli_args.num_workers,
             pin_memory=self.device.type == "cuda",
         )
+        
+        val_dl = DataLoader(
+            val_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=self.cli_args.num_workers,
+            pin_memory=self.device.type == "cuda",
+        )
 
-        val_dl = None
-        if val_dataset is not None:
-            val_dl = DataLoader(
-                val_dataset,
-                batch_size=batch_size,
-                shuffle=False,
-                num_workers=self.cli_args.num_workers,
-                pin_memory=self.device.type == "cuda",
-            )
+        test_dl = DataLoader(
+            test_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=self.cli_args.num_workers,
+            pin_memory=self.device.type == "cuda",
+        )
 
-        return train_dl, val_dl
+        logger.info(
+            f"Train size of: {len(train_dl)}\n"
+            f"Validation size of: {len(val_dl)}\n"
+            f"Test size of: {len(test_dl)}"
+        )
+        return train_dl, val_dl, test_dl
 
     def train_one_epoch(self, epoch_index, train_dl):
         self.model.train()
@@ -175,12 +179,12 @@ class TrainingApp:
         for batch_idx, batch_tuple in enumerate(train_dl):
             self.optimizer.zero_grad()
 
-            loss = self.compute_batch_loss(batch_idx, batch_tuple, train_metrics)
+            loss = self.compute_batch_loss(batch_idx, batch_tuple, train_metrics, phase="train")
             loss.backward()
             self.optimizer.step()
 
             # ? move to train function?
-            if batch_idx % 100 == 0:
+            if batch_idx % 10000 == 0:
                 log_progress(epoch_index, batch_idx, len(train_dl), start_time)
 
         # average_loss = train_metrics.sum() / len(train_dl.dataset)
@@ -199,7 +203,7 @@ class TrainingApp:
         # no gradients needed for validation
         with torch.no_grad():
             for batch_idx, batch_tuple in enumerate(val_dl):
-                loss = self.compute_batch_loss(batch_idx, batch_tuple, val_metrics)
+                loss = self.compute_batch_loss(batch_idx, batch_tuple, val_metrics, phase="val")
 
                 # if batch_idx % 10 == 0:
                 #     log_progress(epoch_index, batch_idx, len(val_dl), start_time)
@@ -211,14 +215,14 @@ class TrainingApp:
 
         return val_metrics.to("cpu")
 
-    def compute_batch_loss(self, batch_idx, batch_tuple, metrics):
+    def compute_batch_loss(self, batch_idx, batch_tuple, metrics, phase):
         features, targets, time_indices = batch_tuple
 
         features = features.to(self.device, non_blocking=True)
         targets = targets.to(self.device, non_blocking=True)
         time_indices = time_indices.to(self.device, non_blocking=True)
 
-        preds = self.model(features, time_indices)
+        preds = self.model(features, time_indices, phase)
         loss = self.loss_func(preds, targets)
         batch_size = features.size(0)
         start_idx = batch_idx * batch_size
@@ -232,17 +236,22 @@ class TrainingApp:
     def train(self):
         logger.info(f"Starting training with {type(self).__name__, self.cli_args}")
 
-        train_dl, val_dl = self.init_dataloaders()
+        train_dl, val_dl, _ = self.init_dataloaders()
 
         for epoch in range(1, self.cli_args.epochs + 1):
             train_metrics = self.train_one_epoch(epoch, train_dl)
 
-            if val_dl is not None:
+            if epoch % 2 == 0 and val_dl is not None:
                 val_metrics = self.validate_one_epoch(epoch, val_dl)
+
+                # if self.patience_counter > self.patience:
+                #     logger.info("Early stopping triggered")
+                #     break
             else:
-                val_metrics = None
-            
-            log_metrics(epoch, train_metrics, val_metrics)
+                # carry forward last val metrics if not validating this epoch
+                val_metrics = None if epoch==1 else val_metrics
+
+            self.log_metrics(epoch, train_metrics, val_metrics)
 
         # check if directory exits
         model_directory = "saved_models"
@@ -252,6 +261,26 @@ class TrainingApp:
         model_path = os.path.join(model_directory, f"model_{self.cli_args.name}.pth")
         torch.save(self.model.state_dict(), model_path)
         logger.info(f"Model saved to {model_path}")
+
+    # ! need to add test functionality 
+    def test(self, test_dl):
+        pass
+
+    def log_metrics(self, epoch_idx, train_metrics, val_metrics=None):
+        train_loss = train_metrics.mean().item()
+        val_loss = val_metrics.mean().item() if val_metrics is not None else None
+
+        message = f"Epoch {epoch_idx}, Training Loss: {train_loss:.4f}"
+        if val_loss is not None:
+            if val_loss < self.best_val_loss:
+                self.best_val_loss = val_loss
+                self.patience_counter = 0
+            else:
+                self.patience_counter += 1
+
+            message += f", Validation Loss: {val_loss:.4f}"
+
+        logger.info(message)
 
 
 ################################################
@@ -279,14 +308,3 @@ def log_progress(epoch_idx, batch_idx, num_batches, start_time):
         f"Estimated completion at {end_time_str}, "
         f"Time left: {estimated_time_left_str}"
     )
-
-def log_metrics(epoch_idx, train_metrics, val_metrics=None):
-    train_loss = train_metrics.mean().item()
-    val_loss = val_metrics.mean().item() if val_metrics is not None else None
-
-    message = f"Epoch {epoch_idx}, Training Loss: {train_loss:.4f}"
-    if val_loss is not None:
-        message += f", Validation Loss: {val_loss:.4f}"
-
-    logger.info(message)
-
